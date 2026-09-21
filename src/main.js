@@ -33,7 +33,7 @@ import {
 import { installScopeMask } from './scopeMask.js';
 import { initFirstRunExperience } from './firstRunExperience.js';
 import { initKeySetup } from './keySetup.js';
-import { loadPhotorealisticTileset } from './mapStartup.js';
+import { loadPhotorealisticTileset, resolveClientCredentials } from './mapStartup.js';
 
 initLogoGaze();
 
@@ -77,8 +77,12 @@ async function init() {
 
     // A direct Google key provides Google 3D plus GEV place search. Cesium ion
     // can host the same 3D tiles and also powers Bing/world-terrain stacks.
-    const cesiumToken = import.meta.env.CESIUM_ION_TOKEN;
-    const googleApiKey = import.meta.env.GOOGLE_MAPS_API_KEY;
+    // Build-time defines first; a hosted production bundle (Render / Docker)
+    // fills any missing key from the server's runtime environment.
+    const { googleApiKey, cesiumToken } = await resolveClientCredentials({
+      googleApiKey: import.meta.env.GOOGLE_MAPS_API_KEY,
+      cesiumToken: import.meta.env.CESIUM_ION_TOKEN,
+    });
     if (googleApiKey) window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
 
     // Create the Cesium viewer with minimal chrome

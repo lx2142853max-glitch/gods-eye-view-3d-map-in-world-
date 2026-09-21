@@ -5,6 +5,32 @@ of current runtime behavior, see [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md
 
 ## [Unreleased]
 
+### Fixed
+
+- Hosted deployments (Render / Docker) now show the live globe instead of a
+  frozen loading screen. The container previously ran the Vite **dev** server,
+  which transforms every module on demand and pre-bundles Cesium on the first
+  request — on a 512 MB free-tier instance that never finished, so visitors
+  only saw the static "Initializing photorealistic world…" cover. The image
+  now builds the production bundle (`npm run build`) and serves it with
+  `npm start` (`vite preview`), with every data relay mounted on the preview
+  server as well (`withPreviewServer` in `vite.config.js`). Ten relays —
+  OpenSky, CelesTrak, TomTom, FIRMS, terrain heights, adsbdb, Overpass, CCTV,
+  GBFS, adsb.lol — previously answered the preview server with the HTML
+  fallback instead of JSON.
+- `vite preview` now honours `HOST` / `PORT` (Render injects `PORT=10000`),
+  the hosted `allowedHosts`, and the frame-ancestors header exactly like the
+  dev server.
+
+### Added
+
+- `GET /api/client-config` reports the browser-facing provider keys
+  (`GOOGLE_MAPS_API_KEY`, `CESIUM_ION_TOKEN`) from the server's **runtime**
+  environment; startup fills any key the bundle was built without. Keys added
+  in Render's Environment tab (or `docker compose`) therefore enable Google
+  3D Tiles without a rebuild. Server-only secrets are never included.
+- `npm start` script (production server) and a Docker `HEALTHCHECK`.
+
 ## [0.1.1] — 2026-09-01 — Installation and live-data fixes
 
 ### Changed

@@ -1,5 +1,10 @@
 # Render Blueprint — deploy God's Eye View with one click.
 # In the Render dashboard: New + → Blueprint → pick this repo → Apply.
+#
+# The Dockerfile builds the production bundle and serves it with `npm start`
+# (vite preview + the data-relay middleware). Render injects PORT=10000 at
+# runtime and the server binds to it. See DEPLOYMENT.md for details.
+#
 # Free plan note: the service sleeps after ~15 min idle; the first visit
 # after that takes about a minute to wake (cold start).
 services:
@@ -14,4 +19,5 @@ services:
         value: 0.0.0.0
       # Optional keys — paste them in Render's Environment tab later
       # (GOOGLE_MAPS_API_KEY, CESIUM_ION_TOKEN, OPENAI_API_KEY, ...).
+      # They are read at runtime (GET /api/client-config), no rebuild needed.
       # The app works keyless on Esri World Imagery without them.

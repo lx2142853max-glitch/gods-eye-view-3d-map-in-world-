@@ -1,5 +1,45 @@
 const clean = (value) => String(value || '').trim();
 
+/** Server endpoint that reports the browser-facing provider keys it holds. */
+export const CLIENT_CONFIG_ENDPOINT = '/api/client-config';
+
+/**
+ * Resolve the browser-facing provider keys for startup.
+ *
+ * Build-time defines (`import.meta.env.*`) win: the dev server re-evaluates
+ * them on every restart, and an image built with the keys has them inlined.
+ * A hosted production bundle (Render / Docker) is usually built WITHOUT keys —
+ * they are added later in the platform's Environment tab — so any key the
+ * bundle is missing is asked from the server, which reads its runtime
+ * environment. Static hosts and network failures leave the build-time values
+ * untouched, so the keyless globe still starts.
+ *
+ * @param {{googleApiKey?: string, cesiumToken?: string}} buildTime
+ * @param {{fetchImpl?: Function, endpoint?: string}} [options]
+ * @returns {Promise<{googleApiKey: string, cesiumToken: string}>}
+ */
+export async function resolveClientCredentials(
+  { googleApiKey = '', cesiumToken = '' } = {},
+  { fetchImpl = globalThis.fetch?.bind(globalThis), endpoint = CLIENT_CONFIG_ENDPOINT } = {},
+) {
+  const resolved = { googleApiKey: clean(googleApiKey), cesiumToken: clean(cesiumToken) };
+  if ((resolved.googleApiKey && resolved.cesiumToken) || typeof fetchImpl !== 'function') {
+    return resolved;
+  }
+  try {
+    const response = await fetchImpl(endpoint, { cache: 'no-store' });
+    if (!response?.ok) return resolved;
+    const payload = await response.json();
+    return {
+      googleApiKey: resolved.googleApiKey || clean(payload?.googleMapsApiKey),
+      cesiumToken: resolved.cesiumToken || clean(payload?.cesiumIonToken),
+    };
+  } catch {
+    // Static host (HTML fallback), offline, or a server without the endpoint.
+    return resolved;
+  }
+}
+
 /**
  * Decide which map provider can deliver the best startup experience.
  * @param {{googleApiKey?: string, cesiumToken?: string}} credentials

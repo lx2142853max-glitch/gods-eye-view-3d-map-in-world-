@@ -1,8 +1,9 @@
 /**
  * Vite configuration for God's Eye View — a cinematic geospatial app.
  *
- * Registers the dev-server proxy middlewares that bypass CORS and add
- * caching/auth for upstream APIs:
+ * Registers the proxy middlewares (mounted on BOTH the dev server and the
+ * `npm start` / `vite preview` production server — see `withPreviewServer`)
+ * that bypass CORS and add caching/auth for upstream APIs:
  *   1. OpenSky  — aircraft state vectors (OAuth / Basic / anon)
  *   2. CelesTrak — satellite TLE orbital elements
  *   3. Overpass  — OpenStreetMap road geometry queries
@@ -7417,6 +7418,52 @@ function normalizeAisTimestamp(value) {
  * keys exist. Prod builds never register this middleware (apply: 'serve'), so
  * the panel's status fetch fails and the client removes the whole surface.
  */
+/**
+ * Browser-facing provider keys, read from the RUNTIME environment.
+ *
+ * `vite build` inlines `import.meta.env.GOOGLE_MAPS_API_KEY` /
+ * `CESIUM_ION_TOKEN` at build time, but hosted deployments (Render, Docker)
+ * typically build the image once and receive keys later through the
+ * platform's Environment tab. `src/mapStartup.js` asks this endpoint for any
+ * key the bundle is missing, so Google 3D Tiles switch on without a rebuild.
+ *
+ * Exposure is unchanged: both keys already ship to every browser by design
+ * (see SECURITY.md — restrict them by HTTP referrer on the provider side).
+ * Server-only secrets (OpenAI, OpenSky, AISStream, …) are never included.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {{googleMapsApiKey: string, cesiumIonToken: string}}
+ */
+export function clientConfigPayload(env = process.env) {
+  return {
+    googleMapsApiKey: String(env.GOOGLE_MAPS_API_KEY ?? '').trim(),
+    cesiumIonToken: String(env.CESIUM_ION_TOKEN ?? '').trim(),
+  };
+}
+
+/**
+ * `GET /api/client-config` → `clientConfigPayload()`. Installed on the dev
+ * AND preview servers so `npm run dev` and `npm start` behave the same.
+ */
+function clientConfigEndpoint() {
+  const install = (server) => {
+    server.middlewares.use('/api/client-config', (req, res) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET, HEAD' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(req.method === 'HEAD' ? undefined : JSON.stringify(clientConfigPayload()));
+    });
+  };
+  return {
+    name: 'gev-client-config',
+    configureServer: install,
+    configurePreviewServer: install,
+  };
+}
+
 function keySetupEndpoint() {
   const respond = (res, statusCode, payload) => {
     res.statusCode = statusCode;
@@ -7659,6 +7706,53 @@ function keySetupEndpoint() {
 }
 
 /**
+ * Serve a relay from `vite preview` (production bundle) exactly as from
+ * `vite dev`. Every data relay in this file only needs `server.middlewares`,
+ * which both server kinds expose, so the dev hook can be reused verbatim.
+ * Hosted deployments (Render / Docker) run `npm run build && npm start` — the
+ * dev server's on-demand transforms and Cesium pre-bundling do not fit a
+ * 512 MB / fractional-CPU instance, and a preview server without these hooks
+ * would answer `/api/*` with the SPA fallback (index.html) instead of JSON.
+ *
+ * Plugins that already ship their own preview hook are left untouched, and a
+ * plugin can stay dev-only by simply not being wrapped (the Provider Settings
+ * endpoint calls `server.restart()`, which the preview server does not have).
+ *
+ * @param {import('vite').Plugin} plugin
+ * @returns {import('vite').Plugin} the same plugin object
+ */
+export function withPreviewServer(plugin) {
+  if (typeof plugin?.configureServer === 'function' && !plugin.configurePreviewServer) {
+    plugin.configurePreviewServer = plugin.configureServer;
+  }
+  return plugin;
+}
+
+/** Relay plugins that must answer on both the dev and the preview server. */
+export const PREVIEW_SERVED_RELAY_PLUGINS = Object.freeze([
+  'opensky-proxy',
+  'celestrak-proxy',
+  'tomtom-proxy',
+  'firms-proxy',
+  'rocket-launches-proxy',
+  'terrain-heights-proxy',
+  'adsbdb-proxy',
+  'overpass-proxy',
+  'military-installations-proxy',
+  'regional-brief-proxy',
+  'weather-effects-proxy',
+  'cctv-proxy',
+  'radio-browser-proxy',
+  'gbfs-proxy',
+  'adsblol-proxy',
+  'ais-live-proxy',
+  'track-backfill-proxies',
+  'openai-realtime-proxy',
+  'google-places-context-proxy',
+  'gev-client-config',
+]);
+
+/**
  * Main Vite configuration factory.
  *
  * Loads .env files via Vite's loadEnv, registers Cesium + local proxy
@@ -7674,56 +7768,76 @@ export default defineConfig(({ mode }) => {
   }
   const env = { ...process.env };
   const localAllowedHosts = ['localhost', '127.0.0.1', '.local'];
+  // Binding to all interfaces means a hosted deployment (Render, Docker, a
+  // LAN demo): accept any Host header and allow iframe embedding. Local runs
+  // keep the strict loopback-only posture.
+  const bindsAllInterfaces = env.HOST === '0.0.0.0' || env.HOST === '::';
+  const host = env.HOST || 'localhost';
+  // Render injects PORT (default 10000) and forwards traffic there; Docker
+  // Compose and local runs fall back to 4173.
+  const port = parseInt(env.PORT, 10) || 4173;
+  const allowedHosts = bindsAllInterfaces ? true : localAllowedHosts;
+  // Framing protection belongs on the APP DOCUMENT, not on API responses:
+  // a browser evaluates frame-ancestors against the framed page's own
+  // navigation response. Without this, a hostile page could frame
+  // `/?setup=1`, align a lure over Provider Settings, and have the framed
+  // app issue a perfectly same-origin credential write that passes every
+  // Host/Origin check. These headers apply to everything this server
+  // serves, which is what makes that attack impossible rather than unlikely.
+  // RELAXED when binding to all interfaces (HOST=0.0.0.0/::) so hosted
+  // sandbox previews can embed the app in an iframe; local runs keep DENY.
+  const headers = bindsAllInterfaces
+    ? { 'Content-Security-Policy': "frame-ancestors *" }
+    : {
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "frame-ancestors 'none'",
+    };
   return {
     plugins: [
       cesium(),
-      openSkyProxy(),
-      celestrakProxy(),
-      tomtomProxy(),
-      firmsProxy(),
-      rocketLaunchesProxy(),
-      terrainHeightsProxy(),
-      adsbdbProxy(),
-      overpassProxy(),
-      militaryInstallationsProxy(),
-      regionalBriefProxy(),
-      weatherEffectsProxy(),
-      cctvProxy(),
-      radioBrowserProxy(),
-      gbfsProxy(),
-      adsbLolProxy(),
-      aisLiveProxy(),
-      trackBackfillProxies(),
-      openAiRealtimeProxy(),
-      googlePlacesContextProxy(),
+      withPreviewServer(openSkyProxy()),
+      withPreviewServer(celestrakProxy()),
+      withPreviewServer(tomtomProxy()),
+      withPreviewServer(firmsProxy()),
+      withPreviewServer(rocketLaunchesProxy()),
+      withPreviewServer(terrainHeightsProxy()),
+      withPreviewServer(adsbdbProxy()),
+      withPreviewServer(overpassProxy()),
+      withPreviewServer(militaryInstallationsProxy()),
+      withPreviewServer(regionalBriefProxy()),
+      withPreviewServer(weatherEffectsProxy()),
+      withPreviewServer(cctvProxy()),
+      withPreviewServer(radioBrowserProxy()),
+      withPreviewServer(gbfsProxy()),
+      withPreviewServer(adsbLolProxy()),
+      withPreviewServer(aisLiveProxy()),
+      withPreviewServer(trackBackfillProxies()),
+      withPreviewServer(openAiRealtimeProxy()),
+      withPreviewServer(googlePlacesContextProxy()),
+      clientConfigEndpoint(),
+      // Dev-only on purpose: writes .env and calls server.restart().
       keySetupEndpoint(),
     ],
     server: {
-      host: env.HOST || 'localhost',
-      port: parseInt(env.PORT, 10) || 4173,
+      host,
+      port,
       // When binding to all interfaces, allow any host; otherwise restrict to local names
-      allowedHosts: (env.HOST === '0.0.0.0' || env.HOST === '::')
-        ? true
-        : localAllowedHosts,
+      allowedHosts,
       fs: {
         // Pinokio keeps optional credentials in this ignored local file.
         deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/ENVIRONMENT'],
       },
-      // Framing protection belongs on the APP DOCUMENT, not on API responses:
-      // a browser evaluates frame-ancestors against the framed page's own
-      // navigation response. Without this, a hostile page could frame
-      // `/?setup=1`, align a lure over Provider Settings, and have the framed
-      // app issue a perfectly same-origin credential write that passes every
-      // Host/Origin check. These headers apply to everything this dev server
-      // serves, which is what makes that attack impossible rather than unlikely.
-      // RELAXED when binding to all interfaces (HOST=0.0.0.0/::) so hosted
-      // sandbox previews can embed the app in an iframe; local runs keep DENY.
-      headers: (env.HOST === '0.0.0.0' || env.HOST === '::')
-        ? { 'Content-Security-Policy': "frame-ancestors *" }
-        : {
-        'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "frame-ancestors 'none'",
-      },
+      headers,
+    },
+    // `npm start` (= `vite preview`) serves the production bundle from dist/
+    // with the same relay middleware — this is what the Dockerfile / Render
+    // run. Mirror the dev-server binding so PORT/HOST behave identically.
+    preview: {
+      host,
+      port,
+      strictPort: true,
+      allowedHosts,
+      headers,
     },
     // Expose selected API keys to the browser via import.meta.env.*
     define: {
